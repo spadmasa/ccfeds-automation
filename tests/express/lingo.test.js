@@ -15,15 +15,18 @@ function resolveLingoGeoPath(path, isBacom = false) {
   const str = String(path);
   const base = process.env.BASE_URL || '';
   const isProd = !!base && !/stage/i.test(base);
-  const acom = isProd ? 'https://www.adobe.com' : 'https://www.stage.adobe.com';
-  const bacom = isProd ? 'https://business.adobe.com' : 'https://business.stage.adobe.com';
+  const acom = process.env.ACOM_ORIGIN || (isProd ? 'https://www.adobe.com' : 'https://www.stage.adobe.com');
+  const bacom = process.env.BACOM_ORIGIN || (isProd ? 'https://business.adobe.com' : 'https://business.stage.adobe.com');
+  const extra = process.env.URL_EXTRA_PARAMS || '';
   if (/^https?:\/\//i.test(str)) {
     const useBacom = /\/\/business\./i.test(str);
     const urlPath = str.replace(/^https?:\/\/[^/]+/i, '');
-    return `${useBacom ? bacom : acom}${urlPath}`;
+    const resolved = `${useBacom ? bacom : acom}${urlPath}`;
+    return extra ? resolved + (resolved.includes('?') ? '&' : '?') + extra : resolved;
   }
   const p = str.startsWith('/') ? str : `/${str}`;
-  return `${isBacom ? bacom : acom}${p}`;
+  const resolved = `${isBacom ? bacom : acom}${p}`;
+  return extra ? resolved + (resolved.includes('?') ? '&' : '?') + extra : resolved;
 }
 const SNAPSHOT_DIR = path.resolve(process.cwd(), 'tests/express/snapshots');
 

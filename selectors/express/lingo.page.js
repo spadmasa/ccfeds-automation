@@ -125,6 +125,10 @@ export class LingoGeoBannerPage {
       throw new Error(`[LingoGeo] URL is not Express (or BACOM): ${url}`);
     }
 
+    // AEM branch domains (aem.live / aem.page) — extract locale from path
+    const aemLocaleMatch = url.match(/\/([a-z_]{2,5})\/express\//);
+    if (aemLocaleMatch) return { prefix: aemLocaleMatch[1], region };
+
     return { prefix: '', region };
   }
 
@@ -690,8 +694,10 @@ export class LingoGeoBannerPage {
   static resolveGeoJsonUrls(pageUrl) {
     const u = new URL(pageUrl);
     const isBacom = /business(?:\.stage)?\.adobe\.com/.test(u.hostname);
+    const isAem = !u.hostname.endsWith('adobe.com');
     const wwwOrigin = u.hostname.startsWith('business.')
       ? `${u.protocol}//${u.hostname.replace(/^business\./, 'www.')}`
+      : isAem ? 'https://www.adobe.com'
       : u.origin;
     const marketsUrl = `${wwwOrigin}/federal/assets/markets.json`;
     const { prefix } = LingoGeoBannerPage.parseUrlLocale(pageUrl);
@@ -733,7 +739,7 @@ export class LingoGeoBannerPage {
 
     const marketsPromise = searchOnly ? Promise.resolve(null) : this.page.waitForResponse(
       (r) => r.url() === marketsUrl && r.status() < 400,
-      { timeout: 1500 },
+      { timeout: 5000 },
     ).catch(() => null);
 
     const localeSearchStringsPromise = this.page.waitForResponse(
@@ -742,30 +748,14 @@ export class LingoGeoBannerPage {
     ).catch(() => null);
 
     let httpStatus;
-    try {
-      const navResponse = await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-      httpStatus = navResponse?.status();
-      if (httpStatus === 404) {
-        await this.page.waitForLoadState('load').catch(() => {});
-        if (this.page.url() !== url) {
-          console.info(`[LingoGeo] Redirected to: ${this.page.url()}`);
-          httpStatus = undefined;
-        }
+    const navResponse = await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    httpStatus = navResponse?.status();
+    if (httpStatus === 404) {
+      await this.page.waitForLoadState('load').catch(() => {});
+      if (this.page.url() !== url) {
+        console.info(`[LingoGeo] Redirected to: ${this.page.url()}`);
+        httpStatus = undefined;
       }
-    } catch (error) {
-      if (
-        error.message.includes('ERR_NAME_NOT_RESOLVED')
-        || error.message.includes('ERR_CONNECTION_REFUSED')
-        || error.message.includes('ERR_INTERNET_DISCONNECTED')
-      ) {
-        console.warn(`[LingoGeo] Stage unreachable (no VPN?) — skipping navigation: ${url}`);
-        return {
-          supportedMarketsData: null,
-          marketsData: null,
-          localeSearchStrings: null,
-        };
-      }
-      throw error;
     }
 
     const [supportedMarketsResp, marketsResp, localeSearchStringsResp] = await Promise.all([
@@ -783,7 +773,7 @@ export class LingoGeoBannerPage {
     const marketsData = searchOnly ? null : (
       marketsResp
         ? await marketsResp.json().catch(() => null)
-        : await this.page.request.get(marketsUrl).then((r) => r.json()).catch(() => null)
+        : await this.page.request.get(marketsUrl).then((r) => r.ok() ? r.json() : null).catch(() => null)
     );
 
     const localeSearchStringsRaw = localeSearchStringsResp
@@ -832,8 +822,6 @@ export class LingoGeoBannerPage {
       sameSite: 'Lax',
     }]);
   }
-
-  // ─── Dismiss Helpers ───────────────────────────────────────────────────────
 
   async waitForGeoModalReady() {
     await expect(this.geoRoutingModal).toBeVisible({ timeout: 35000 });
@@ -1294,26 +1282,18 @@ export class LingoGeoBannerPage {
     expect(missingLangs, `Language selector missing: ${missingLangs.join(', ')}`).toHaveLength(0);
     console.info(`[LingoGeo] Language selector: all ${nativeNames.length} languages present ✓`);
 
-    // ── Language selector — alphabetical order (not yet implemented in stage) ──
-    // Sort logic mirrors market selector. Mixed-script names (CJK, Korean) may need
-    // collation adjustments once stage ships the sorted language selector.
-    // const langLocaleMap = { cn: 'zh-CN', tw: 'zh-CN', jp: 'ja', kr: 'ko', br: 'pt-BR' };
-    // const { prefix: langPrefix } = LingoGeoBannerPage.parseUrlLocale(this.page.url());
-    // const langSortLocale = langLocaleMap[langPrefix] || langPrefix || 'en';
-    // const cleanLangItems = langItems.map((v) => LingoGeoBannerPage.stripBidiChars(v.trim()));
-    // const sortedLangs = [...cleanLangItems].sort((a, b) => a.localeCompare(b, langSortLocale, { sensitivity: 'base' }));
-    // for (let i = 0; i < cleanLangItems.length; i++) {
-    //   expect(
-    //     cleanLangItems[i],
-    //     `Language selector item [${i}] out of order — found '${cleanLangItems[i]}' but expected '${sortedLangs[i]}' (locale: '${langSortLocale}')`,
-    //   ).toBe(sortedLangs[i]);
-    // }
-    // console.info(`[LingoGeo] Language selector: alphabetical order verified for ${cleanLangItems.length} items ✓`);
+    // ── Language selector — order matches supported-markets.json ─────────────
+    const cleanLangItems = langItems.map((v) => LingoGeoBannerPage.stripBidiChars(v.trim()));
+    const outOfOrder = nativeNames.filter((name, i) => !cleanLangItems[i]?.includes(name));
+    expect(outOfOrder, `Language selector order mismatch: [${outOfOrder.join(', ')}]`).toHaveLength(0);
+    console.info(`[LingoGeo] Language selector options are as per supported-markets.json order: ${nativeNames.length} items ✓`);
 
     await this.languageSelectorButton.click();
     await this.languageSelectorPopover.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
 
     // ── Market selector — current locale's supported regions ──────────────────
+    expect(supportedMarketsData, 'supported-markets.json unavailable — market selector check cannot run').not.toBeNull();
+    expect(marketsData, 'markets.json unavailable — market selector check cannot run').not.toBeNull();
     const { prefix } = LingoGeoBannerPage.parseUrlLocale(this.page.url());
     const row = LingoGeoBannerPage.getMarketRow(prefix, supportedMarketsData);
     const csv = LingoGeoBannerPage.getSupportedRegionsCsvFromRow(row);
@@ -1461,6 +1441,11 @@ export class LingoGeoBannerPage {
    * @param {{ noResultsLanguage?: string|null, noResultsMarket?: string|null, searchLanguage?: string|null, searchMarket?: string|null }|null} localeSearchStrings — when set, runs {@link assertSelectorSearch} first
    */
   async assertSelectorInteractions(context, marketsData, localeSearchStrings = null) {
+    // TODO: remove this skip once AEM URL redirect preserves akamaiLocale
+    // if (process.env.ACOM_ORIGIN) {
+    //   console.info('[LingoGeo] Skipping selector interactions on AEM URL (navigation drops akamaiLocale)');
+    //   return;
+    // }
     // Derive prefix and region from the current page URL — no spec fields needed.
     const { prefix, region } = LingoGeoBannerPage.parseUrlLocale(this.page.url());
 
@@ -1484,10 +1469,9 @@ export class LingoGeoBannerPage {
     await this.languageSelectorButton.click();
     await this.languageSelectorPopover.waitFor({ state: 'visible', timeout: 8000 });
     await Promise.all([
-      this.page.waitForNavigation({ waitUntil: 'load', timeout: 5000 }).catch(() => {}),
+      this.page.waitForNavigation({ waitUntil: 'load', timeout: 10000 }).catch(() => {}),
       this.languageSelectedItem.click(),
     ]);
-
     const cookiesAfterLang = await context.cookies();
     const intlCookie = cookiesAfterLang.find((c) => c.name === 'international');
     expect(intlCookie, 'Language selector click must set the "international" cookie').toBeDefined();

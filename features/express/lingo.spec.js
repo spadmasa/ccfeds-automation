@@ -15,7 +15,7 @@ const jsonSnapshotFeature = {
   tcid: 'JS1',
   name: '@express-geo-json-snapshot',
   path: '/express/?akamaiLocale=us&mep=off',
-  tags: '@jsonSnapshot @express-lingo-geo-suite',
+  tags: '@jsonSnapshot',
 };
 
 const selectorContentsFeatures = [
@@ -1116,7 +1116,7 @@ const currencyNegativeFeatures = [
     path: '/nl/express/?akamaiLocale=be&mep=off',
     clickLangPrefix: 'fr',
     tags: '@express-lingo-geo-suite @currency-negative @currency-click-lang @smoke',
-  },
+  }, 
 
   // ── N9–N11: country param / cookie priority checks ───────────────────────────
   // N9: country param only — no akamaiLocale
@@ -1673,7 +1673,7 @@ const searchFeatures = [
     { tcid: '202SR8', name: '@express-geo-search-kr-kr', path: '/kr/express/?akamaiLocale=kr&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search' },
     { tcid: '202SR9', name: '@express-geo-search-it-it', path: '/it/express/?akamaiLocale=it&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search' },
     { tcid: '202SR10', name: '@express-geo-search-br-br', path: '/br/express/?akamaiLocale=br&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search' },
-    { tcid: '202SR11', name: '@express-geo-search-nl-nl', path: '/nl/express/?akamaiLocale=nL&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search @smoke' },
+    { tcid: '202SR11', name: '@express-geo-search-nl-nl', path: '/nl/express/?akamaiLocale=nl&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search @smoke' },
     { tcid: '202SR12', name: '@express-geo-search-tw-tw', path: '/tw/express/?akamaiLocale=tw&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search' },
     { tcid: '202SR13', name: '@express-geo-search-cn-us', path: '/cn/express/?akamaiLocale=us&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search' },
     { tcid: '202SR14', name: '@express-geo-search-dk-dk', path: '/dk/express/?akamaiLocale=dk&mep=off&languageBanner=off', tags: '@express-lingo-geo-suite @search @smoke' },
@@ -1700,8 +1700,8 @@ const searchFeatures = [
 const customFeature = {
   tcid: 'C1',
   name: '@custom-playground',
-  path: 'https://www.stage.adobe.com/se/express/?akamaiLocale=ch',               // required — leave empty to skip // add with akamaiLocale
-  uiExpectation: 'modal',      // optional: 'none' | 'banner' | 'modal'
+  path: 'https://www.stage.adobe.com/in/express/?akamaiLocale=fr',               // required — leave empty to skip // add with akamaiLocale
+  uiExpectation: 'none',      // optional: 'none' | 'banner' | 'modal'
   prefLangCookie: 'kr',     // sets `international` cookie before load
   countryCookie: 'ch',      // sets `country` cookie before navigation
   tags: '@custom',
