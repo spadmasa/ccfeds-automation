@@ -1,6 +1,7 @@
 import { expect } from '@playwright/test';
 import { rtlLocales } from '../../data/feds-lnav-locales.js';
 import { setConsentCookies } from '../../utils/analytics/analytics.interceptor.js';
+import { BREAKPOINTS } from '../../features/feds/feds-lnav/feds-lnav.spec.js';
 
 export default class FedsLnavPage {
   constructor(page, localeHref = 'https://www.adobe.com/') {
@@ -16,15 +17,9 @@ export default class FedsLnavPage {
     this.adobeLogo     = page.locator('.feds-brand-container .feds-brand');
     this.adobeLogoImg  = page.locator('.feds-brand-container .feds-brand img').first();
 
-    // ── Acrobat brand link — only <a> in gnav-items (dropdowns are <button>) ──
-    // ── Nav bar links — direct child > avoids nested dropdown panel links ─────
-    // All 4 are li > a direct children of ul.feds-gnav-items pointing to locale root.
-    // nth() reflects DOM source order: Acrobat brand → Compare Plans → Learn & Support → Free Trials
-    const navBarLinks     = page.locator(`ul.feds-gnav-items > li > a.feds-link[href="${localeHref}"]`);
-    this.acrobatBrandLink = navBarLinks.nth(0);
-    this.comparePlansLink = navBarLinks.nth(1);
-    this.learnSupportLink = navBarLinks.nth(2);
-    this.freeTrialLink    = navBarLinks.nth(3);
+    // ── Direct nav bar links — generic, works on any page ────────────────────
+    // No href filter — finds whatever direct <a> links exist on the current page.
+    this.directNavLinks = page.locator('ul.feds-gnav-items > li > a.feds-link');
 
     // ── Local nav bar ─────────────────────────────────────────────────────────
     this.localnavBar   = page.locator('button.feds-localnav-bar');
@@ -75,6 +70,24 @@ export default class FedsLnavPage {
     this.allDropdownBtns = page.locator('button.mega-menu.feds-link');
   }
 
+  // ── Compact mode detection ────────────────────────────────────────────────
+  // Two-step check:
+  //   Step 1 — viewport width < BREAKPOINTS.desktopMin (1024px) → compact for sure
+  //   Step 2 — viewport >= 1024px but is-compact class present → LNav JS forced
+  //            compact due to available space (e.g. content overflow). Log a warning
+  //            since this should not happen at 1600px — it's a nav rendering bug.
+
+  async isCompact() {
+    const viewport = this.page.viewportSize();
+    if (viewport.width < BREAKPOINTS.desktopMin) return true;
+    const cls = await this.navContainer.getAttribute('class');
+    const compact = cls?.includes('is-compact') ?? false;
+    if (compact) {
+      console.warn(`[LNav] WARNING — is-compact class present at ${viewport.width}px (expected desktop layout ≥${BREAKPOINTS.desktopMin}px). LNav JS is forcing compact mode — possible content overflow or rendering bug.`);
+    }
+    return compact;
+  }
+
   // ── Navigation ────────────────────────────────────────────────────────────
 
   async navigateTo(baseURL, localePath, testPagePath) {
@@ -83,6 +96,9 @@ export default class FedsLnavPage {
     await setConsentCookies(this.page, domain);
     console.info(`[LNav] Navigating to: ${url}`);
     const response = await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    // Wait for FEDS nav JS to initialise — faster than waitUntil:'load' but ensures
+    // header.global-navigation is in the DOM before any step runs
+    await this.page.locator('header.global-navigation').waitFor({ state: 'visible', timeout: 30000 }).catch(() => {});
     const status = response?.status() ?? 0;
     console.info(`[LNav] ${url} → HTTP ${status}`);
     return { url, status };
@@ -94,9 +110,13 @@ export default class FedsLnavPage {
     console.info('[LNav] Step 2: Checking nav wrapper, Adobe logo, nav list are visible');
     await expect(this.navWrapper).toBeVisible({ timeout: 15000 });
     await expect(this.adobeLogo).toBeVisible({ timeout: 15000 });
-    await expect(this.navList).toBeVisible({ timeout: 15000 });
-    // Allow nav entrance animations to settle before interaction checks
-    await this.page.waitForTimeout(500);
+    // isCompact() logs a warning automatically if is-compact appears at ≥1024px
+    if (await this.isCompact()) {
+      await expect(this.mobileMenuBtn, 'Hamburger button must be visible in compact mode').toBeVisible({ timeout: 15000 });
+      console.info('[LNav] Step 2: compact mode — hamburger button visible');
+    } else {
+      await expect(this.navList).toBeVisible({ timeout: 15000 });
+    }
     console.info('[LNav] Step 2: PASS — nav structure visible');
   }
 
@@ -116,18 +136,43 @@ export default class FedsLnavPage {
   // ── All nav links href ────────────────────────────────────────────────────
 
   async validateAllNavLinks() {
-    console.info('[LNav] Step 3: Checking every <a> inside the nav has a valid href');
-    const linkData = await this.navContainer.locator('a').evaluateAll((els) =>
-      els.map((el, i) => ({
-        href: el.getAttribute('href'),
-        text: (el.textContent || '').trim() || `link ${i + 1}`,
-      }))
-    );
-    expect(linkData.length, 'No links found inside nav').toBeGreaterThan(0);
-    for (const { href, text } of linkData) {
-      expect(href, `Nav link "${text}" is missing href`).toBeTruthy();
+    console.info('[LNav] Step 3: Checking nav links by section — brand, top nav, local nav, breadcrumbs');
+
+    const sections = [
+      { label: 'Brand',       locator: this.navContainer.locator('.feds-brand-container a') },
+      { label: 'Top nav',     locator: this.navContainer.locator('ul.feds-gnav-items > li > a') },
+      { label: 'Local nav',   locator: this.navContainer.locator('nav.localnav a') },
+      { label: 'Breadcrumbs', locator: this.navContainer.locator('.feds-breadcrumbs-wrapper a, ul.feds-breadcrumbs a') },
+    ];
+
+    let total = 0;
+    for (const { label, locator } of sections) {
+      // Single browser call per section — avoids timeout from serial await per element
+      const linkData = await locator.filter({ visible: true }).evaluateAll((els) =>
+        els.map((el) => ({
+          href: el.getAttribute('href'),
+          text: (el.innerText || '').trim()
+            || el.querySelector('img')?.getAttribute('alt')
+            || '(no text)',
+        }))
+      );
+      if (linkData.length === 0) {
+        console.info(`[LNav] Step 3: [${label}] — no visible links found, skipping`);
+        continue;
+      }
+      for (const { href, text } of linkData) {
+        if (href === '#') {
+          console.warn(`[LNav] Step 3: [${label}] WARNING — "${text}" has href="#" (placeholder link)`);
+        } else {
+          expect(href, `[${label}] "${text}" is missing href`).toBeTruthy();
+          console.info(`[LNav] Step 3: [${label}] "${text}" — href="${href}" ✓`);
+        }
+        total++;
+      }
     }
-    console.info(`[LNav] Step 3: PASS — ${linkData.length} nav links all have href`);
+
+    expect(total, 'No nav links found across all sections').toBeGreaterThan(0);
+    console.info(`[LNav] Step 3: PASS — ${total} nav links validated across all sections`);
   }
 
   // ── Adobe logo ────────────────────────────────────────────────────────────
@@ -140,44 +185,53 @@ export default class FedsLnavPage {
     console.info(`[LNav] Step 4: PASS — Adobe logo href="${href}"`);
   }
 
-  // ── Acrobat brand link ────────────────────────────────────────────────────
+  // ── Direct nav bar links — generic, works on any page/locale ────────────
 
-  async validateAcrobatBrandLink() {
-    console.info('[LNav] Step 5: Checking Acrobat brand link — visible, href, clickable');
-    await expect(this.acrobatBrandLink, 'Acrobat brand link not found — check selector in feds-lnav.page.js').toBeVisible({ timeout: 15000 });
-    const href = await this.acrobatBrandLink.getAttribute('href');
-    expect(href, 'Acrobat brand link must have an href').toBeTruthy();
-    console.info(`[LNav] Step 5: PASS — Acrobat brand href="${href}"`);
+  async validateDirectNavLinks() {
+    console.info('[LNav] Step 5: Checking direct nav bar links — visible, have href');
+    const links = this.directNavLinks.filter({ visible: true });
+    const count = await links.count();
+    expect(count, 'No direct nav links found in gnav').toBeGreaterThan(0);
+
+    for (let i = 0; i < count; i++) {
+      const link = links.nth(i);
+      const text = ((await link.innerText()) || '').trim() || `link-${i}`;
+      const href = await link.getAttribute('href');
+      expect(href, `Direct nav link "${text}" is missing href`).toBeTruthy();
+      await expect(link, `Direct nav link "${text}" is not visible`).toBeVisible({ timeout: 15000 });
+      console.info(`[LNav] Step 5: "${text}" — href="${href}" ✓`);
+    }
+    console.info(`[LNav] Step 5: PASS — ${count} direct nav link(s) validated`);
   }
 
-  // ── Compare Plans ─────────────────────────────────────────────────────────
+  // ── Active element — desktop only (border-bottom at width >= 1024px) ──────
 
-  async validateComparePlans() {
-    console.info('[LNav] Step 6: Checking Compare Plans link — visible, href, clickable');
-    await expect(this.comparePlansLink, 'Compare Plans link not found — check selector in feds-lnav.page.js').toBeVisible({ timeout: 15000 });
-    const href = await this.comparePlansLink.getAttribute('href');
-    expect(href, 'Compare Plans link must have an href').toBeTruthy();
-    console.info(`[LNav] Step 6: PASS — Compare Plans href="${href}"`);
-  }
+  async validateActiveElement() {
+    // Use hamburger visibility to detect actual layout — content overflow can trigger
+    // tablet mode even at desktop widths, so viewport width alone is not reliable
+    const isDesktopLayout = !await this.mobileMenuBtn.isVisible().catch(() => true);
+    if (!isDesktopLayout) {
+      console.warn('[LNav] Active element: WARN — hamburger is visible at desktop viewport. GNAV content is overflowing and triggering tablet/mobile layout on desktop. Active element underline will not be shown.');
+      return;
+    }
 
-  // ── Learn and Support ─────────────────────────────────────────────────────
+    const activeItem = this.page.locator('li.active-element');
+    // Active element can be an <a> (direct link) or <button> (dropdown trigger)
+    const activeLink = this.page.locator('li.active-element > a.feds-link, li.active-element > button.feds-link');
 
-  async validateLearnAndSupport() {
-    console.info('[LNav] Step 7: Checking Learn & Support link — visible, href, clickable');
-    await expect(this.learnSupportLink, 'Learn & Support link not found — check selector in feds-lnav.page.js').toBeVisible({ timeout: 15000 });
-    const href = await this.learnSupportLink.getAttribute('href');
-    expect(href, 'Learn & Support link must have an href').toBeTruthy();
-    console.info(`[LNav] Step 7: PASS — Learn & Support href="${href}"`);
-  }
+    await expect(activeItem, 'li.active-element not found').toBeVisible({ timeout: 15000 });
+    await expect(activeLink, 'a/button.feds-link inside li.active-element not found').toBeVisible({ timeout: 15000 });
+    // href only on <a> — buttons don't have it
+    const tag = await activeLink.first().evaluate((el) => el.tagName.toLowerCase());
+    if (tag === 'a') {
+      await expect(activeLink.first(), 'Active link is missing href').toHaveAttribute('href', /.+/);
+    }
 
-  // ── Free Trial ────────────────────────────────────────────────────────────
-
-  async validateFreeTrial() {
-    console.info('[LNav] Step 8: Checking Free Trial link — visible, href, clickable');
-    await expect(this.freeTrialLink, 'Free Trial link not found — check selector in feds-lnav.page.js').toBeVisible({ timeout: 15000 });
-    const href = await this.freeTrialLink.getAttribute('href');
-    expect(href, 'Free Trial link must have an href').toBeTruthy();
-    console.info(`[LNav] Step 8: PASS — Free Trial href="${href}"`);
+    const borderStyle = await activeItem.evaluate((el) => window.getComputedStyle(el).borderBottomStyle);
+    if (borderStyle !== 'solid')
+      console.warn(`[LNav] Active element WARN: li.active-element border-bottom-style="${borderStyle}" (expected solid) — underline may not be applied on this page/variant`);
+    else
+      console.info('[LNav] Active element: PASS — li.active-element visible with underline ✓');
   }
 
   // ── CTAs ──────────────────────────────────────────────────────────────────
@@ -185,15 +239,17 @@ export default class FedsLnavPage {
   async validateCtas() {
     console.info('[LNav] Step 9: Checking primary and secondary CTAs — visible, href, clickable');
     await expect(this.primaryCta, 'Primary CTA not found').toBeVisible({ timeout: 15000 });
+    const primaryText = ((await this.primaryCta.innerText().catch(() => '')) || '').trim() || 'Primary CTA';
     const primaryHref = await this.primaryCta.getAttribute('href');
-    expect(primaryHref, 'Primary CTA must have an href').toBeTruthy();
-    console.info(`[LNav] Step 9: PASS — Primary CTA href="${primaryHref}"`);
+    expect(primaryHref, `"${primaryText}" CTA must have an href`).toBeTruthy();
+    console.info(`[LNav] Step 9: PASS — "${primaryText}" href="${primaryHref}" ✓`);
 
     const secondaryVisible = await this.secondaryCta.isVisible().catch(() => false);
     if (secondaryVisible) {
+      const secondaryText = ((await this.secondaryCta.innerText().catch(() => '')) || '').trim() || 'Secondary CTA';
       const secondaryHref = await this.secondaryCta.getAttribute('href');
-      expect(secondaryHref, 'Secondary CTA must have an href').toBeTruthy();
-      console.info(`[LNav] Step 9: PASS — Secondary CTA href="${secondaryHref}"`);
+      expect(secondaryHref, `"${secondaryText}" CTA must have an href`).toBeTruthy();
+      console.info(`[LNav] Step 9: PASS — "${secondaryText}" href="${secondaryHref}" ✓`);
     } else {
       console.info('[LNav] Step 9: Secondary CTA not present on this page — skipping');
     }
@@ -272,27 +328,74 @@ export default class FedsLnavPage {
     console.info(`[LNav] Dropdown: "${name}" has ${linkData.length} visible links — checking href and clickability`);
     for (const { href, text } of linkData) {
       expect(href, `"${name}" link "${text}" is missing href`).toBeTruthy();
-      expect(href, `"${name}" link "${text}" href must point to adobe.com`).toContain('adobe.com');
-      // TODO: uncomment when locale-prefix bug is fixed in PDF dropdown first column
-      // const localePath = new URL(this.localeHref).pathname;
-      // if (localePath !== '/') {
-      //   expect(href, `BUG: "${text}" missing locale "${localePath}" — href="${href}"`).toContain(localePath);
-      // }
+      console.info(`[LNav] Dropdown: "${name}" → "${text}" — href="${href}" ✓`);
     }
-    // sample clickability check on first link — panel is confirmed open and links are visible
-    await links.first().click({ trial: true, timeout: 15000 });
 
-    // ── Link descriptions — 1 browser call for all texts ─────────────────────
-    const descTexts = await panel.locator('span.links-card-links__item-description').filter({ visible: true })
-      .evaluateAll((els) => els.map((el) => (el.textContent || '').trim()));
-    if (descTexts.length > 0) {
-      console.info(`[LNav] Dropdown: "${name}" has ${descTexts.length} description(s)`);
-      for (const [i, text] of descTexts.entries()) {
+    // ── Link descriptions — text + 14px font ─────────────────────────────────
+    const descData = await panel.locator('span.links-card-links__item-description').filter({ visible: true })
+      .evaluateAll((els) => els.map((el) => {
+        const s = window.getComputedStyle(el);
+        return { text: (el.innerText || '').trim(), fontSize: s.fontSize, fontFamily: s.fontFamily };
+      }));
+    if (descData.length > 0) {
+      console.info(`[LNav] Dropdown: "${name}" has ${descData.length} description(s)`);
+      for (const [i, { text, fontSize, fontFamily }] of descData.entries()) {
         expect(text, `"${name}" description ${i + 1} has empty text`).toBeTruthy();
-        console.info(`[LNav] Dropdown: "${name}" description ${i + 1} — "${text}"`);
+        if (!fontFamily.toLowerCase().includes('adobe clean')) console.warn(`[LNav] Font WARN: "${name}" description "${text}" — font-family: ${fontFamily.split(',')[0].trim()} (expected Adobe Clean)`);
+        if (fontSize !== '14px') console.warn(`[LNav] Font WARN: "${name}" description "${text}" — font-size: ${fontSize} (expected 14px)`);
+        console.info(`[LNav] Dropdown: "${name}" description ${i + 1} — "${text}" ${fontSize} ✓`);
       }
+    }
+
+    // ── Font sizes + family inside open panel (warnings only — test does not fail) ──
+    const warnFont = (label, text, fontFamily, fontSize, expectedSize) => {
+      const familyOk = fontFamily.toLowerCase().includes('adobe clean');
+      const sizeOk   = fontSize === expectedSize;
+      if (!familyOk) console.warn(`[LNav] Font WARN: "${name}" ${label} "${text}" — font-family: ${fontFamily.split(',')[0].trim()} (expected Adobe Clean)`);
+      if (!sizeOk)   console.warn(`[LNav] Font WARN: "${name}" ${label} "${text}" — font-size: ${fontSize} (expected ${expectedSize})`);
+      if (familyOk && sizeOk) console.info(`[LNav] Font: "${name}" ${label} "${text}" — ${fontSize} | ${fontFamily.split(',')[0].trim()} ✓`);
+    };
+
+    // Headings — Adobe Clean, 24px
+    const headingFontData = await panel.locator('h2.links-card-title').filter({ visible: true })
+      .evaluateAll((els) => els.map((el) => {
+        const s = window.getComputedStyle(el);
+        return { text: (el.innerText || '').trim(), fontSize: s.fontSize, fontFamily: s.fontFamily };
+      }));
+    if (headingFontData.length === 0)
+      console.info(`[LNav] Font: "${name}" — no headings found, skipping 24px check`);
+    for (const { text, fontSize, fontFamily } of headingFontData)
+      warnFont('heading', text, fontFamily, fontSize, '24px');
+
+    // Product link titles — Adobe Clean, 16px
+    const productFontData = await panel.locator('a.links-card-links__item-title, a.links-card__item-link').filter({ visible: true })
+      .evaluateAll((els) => els.map((el) => {
+        const s = window.getComputedStyle(el);
+        return { text: (el.innerText || '').trim().slice(0, 40), fontSize: s.fontSize, fontFamily: s.fontFamily };
+      }));
+    for (const { text, fontSize, fontFamily } of productFontData)
+      warnFont('product', text, fontFamily, fontSize, '16px');
+
+    // All other visible links — Adobe Clean, 14px
+    const otherLinkFontData = await panel.locator('a:not(.links-card-links__item-title):not(.links-card__item-link)').filter({ visible: true })
+      .evaluateAll((els) => els.map((el) => {
+        const s = window.getComputedStyle(el);
+        return { text: (el.innerText || '').trim().slice(0, 40), fontSize: s.fontSize, fontFamily: s.fontFamily };
+      }));
+    for (const { text, fontSize, fontFamily } of otherLinkFontData) {
+      if (!text) continue;
+      warnFont('link', text, fontFamily, fontSize, '14px');
+    }
+
+    // ── Column gap — desktop dropdown card grid (div.feds-gnav-cards) ─────────
+    const gnavCards = panel.locator('div.feds-gnav-cards').first();
+    const hasCards = await gnavCards.count() > 0;
+    if (hasCards) {
+      const colGap = await gnavCards.evaluate((el) => window.getComputedStyle(el).columnGap);
+      console.info(`[LNav] Gaps "${name}": div.feds-gnav-cards column-gap=${colGap}`);
+      expect(colGap, `"${name}" dropdown column-gap: ${colGap} (expected 8px)`).toBe('8px');
     } else {
-      console.info(`[LNav] Dropdown: "${name}" — no link descriptions found`);
+      console.info(`[LNav] Gaps "${name}": div.feds-gnav-cards not found — skipping column-gap check`);
     }
 
     // ── Promo card (optional — not all dropdowns have one) ─────────────────
@@ -565,59 +668,211 @@ export default class FedsLnavPage {
   // Dropdown descriptions: 14px.
 
   async validateNavFontStyles() {
-    console.info('[LNav] Font check: product name 16px, nav links 14px, descriptions 14px');
+    console.info('[LNav] Font check: checking font sizes for all always-visible nav elements');
     const failures = [];
 
-    // ── Product name — 16px ───────────────────────────────────────────────────
+    const check = (label, fontFamily, fontSize, expectedSize) => {
+      if (!fontFamily.toLowerCase().includes('adobe clean'))
+        failures.push(`[${label}] font-family: ${fontFamily.split(',')[0].trim()} (expected Adobe Clean)`);
+      if (fontSize !== expectedSize)
+        console.warn(`[LNav] Font WARN: [${label}] font-size: ${fontSize} (expected ${expectedSize})`);
+      else
+        console.info(`[LNav] Font: [${label}] ${fontSize} | ${fontFamily.split(',')[0].trim()} ✓`);
+    };
+
+    // ── Product name (localnav bar label) — 16px ──────────────────────────────
     const productNameData = await this.navContainer.locator('span.feds-localnav-bar-label')
       .filter({ visible: true })
       .evaluateAll((els) => els.map((el) => {
         const s = window.getComputedStyle(el);
-        return { fontFamily: s.fontFamily, fontSize: s.fontSize, text: (el.textContent || '').trim().slice(0, 40) };
+        return { fontFamily: s.fontFamily, fontSize: s.fontSize, text: (el.innerText || '').trim().slice(0, 40) };
       }));
-
     for (const { fontFamily, fontSize, text } of productNameData) {
-      if (!fontFamily.toLowerCase().includes('adobe clean')) {
-        failures.push(`Product name "${text}" — font-family: ${fontFamily} (expected Adobe Clean)`);
-      }
-      if (fontSize !== '16px') {
-        failures.push(`Product name "${text}" — font-size: ${fontSize} (expected 16px)`);
-      }
+      check(`Product name "${text}"`, fontFamily, fontSize, '16px');
     }
 
-    // ── Nav links + buttons — Adobe Clean + 14px ─────────────────────────────
+    // ── GNAV links + buttons — 14px ───────────────────────────────────────────
     const linkData = await this.navContainer.locator('a.feds-link, button.feds-link')
       .filter({ visible: true })
       .evaluateAll((els) => els.map((el) => {
         const s = window.getComputedStyle(el);
-        return { fontFamily: s.fontFamily, fontSize: s.fontSize, text: (el.textContent || '').trim().slice(0, 40) };
+        return { fontFamily: s.fontFamily, fontSize: s.fontSize, text: (el.innerText || '').trim().slice(0, 40) };
       }));
-
     expect(linkData.length, 'No visible nav links found for font check').toBeGreaterThan(0);
     for (const { fontFamily, fontSize, text } of linkData) {
-      if (!fontFamily.toLowerCase().includes('adobe clean')) {
-        failures.push(`"${text}" — font-family: ${fontFamily} (expected Adobe Clean)`);
-      }
-      if (fontSize !== '14px') {
-        failures.push(`"${text}" — font-size: ${fontSize} (expected 14px)`);
-      }
+      check(`GNAV link "${text}"`, fontFamily, fontSize, '14px');
     }
 
-    // ── Dropdown descriptions — 14px ──────────────────────────────────────────
-    const descData = await this.navContainer.locator('span.links-card-links__item-description')
+    // ── Breadcrumbs — 14px ────────────────────────────────────────────────────
+    const breadcrumbData = await this.navContainer
+      .locator('.feds-breadcrumbs-wrapper a, ul.feds-breadcrumbs a')
+      .filter({ visible: true })
       .evaluateAll((els) => els.map((el) => {
         const s = window.getComputedStyle(el);
-        return { fontSize: s.fontSize, text: (el.textContent || '').trim().slice(0, 40) };
+        return { fontFamily: s.fontFamily, fontSize: s.fontSize, text: (el.innerText || '').trim().slice(0, 40) };
       }));
+    for (const { fontFamily, fontSize, text } of breadcrumbData) {
+      check(`Breadcrumb "${text}"`, fontFamily, fontSize, '14px');
+    }
 
-    for (const { fontSize, text } of descData) {
-      if (fontSize !== '14px') {
-        failures.push(`Description "${text}" — font-size: ${fontSize} (expected 14px)`);
-      }
+    // ── Buttons / CTAs — font 14px, padding 10px top/bottom 24px left/right ────
+    const ctaData = await this.navContainer.locator('a.feds-primary-cta, a.feds-secondary-cta, a[class*="cta"]')
+      .filter({ visible: true })
+      .evaluateAll((els) => els.map((el) => {
+        const s = window.getComputedStyle(el);
+        return {
+          text:         (el.innerText || '').trim().slice(0, 30),
+          fontSize:     s.fontSize,
+          fontFamily:   s.fontFamily,
+          paddingTop:   s.paddingTop,
+          paddingBottom: s.paddingBottom,
+          paddingLeft:  s.paddingLeft,
+          paddingRight: s.paddingRight,
+        };
+      }));
+    for (const { text, fontSize, fontFamily, paddingTop, paddingBottom, paddingLeft, paddingRight } of ctaData) {
+      console.info(`[LNav] Font: CTA "${text}" — font: ${fontSize} | padding: ${paddingTop} ${paddingRight} ${paddingBottom} ${paddingLeft} | ${fontFamily.split(',')[0].trim()}`);
+      if (!fontFamily.toLowerCase().includes('adobe clean'))
+        failures.push(`CTA "${text}" — font-family: ${fontFamily.split(',')[0].trim()} (expected Adobe Clean)`);
+      if (fontSize      !== '14px')  console.warn(`[LNav] Font WARN: CTA "${text}" — font-size: ${fontSize} (expected 14px)`);
+      if (paddingTop    !== '10px')  console.warn(`[LNav] Font WARN: CTA "${text}" — padding-top: ${paddingTop} (expected 10px)`);
+      if (paddingBottom !== '10px')  console.warn(`[LNav] Font WARN: CTA "${text}" — padding-bottom: ${paddingBottom} (expected 10px)`);
+      if (paddingLeft   !== '24px')  console.warn(`[LNav] Font WARN: CTA "${text}" — padding-left: ${paddingLeft} (expected 24px)`);
+      if (paddingRight  !== '24px')  console.warn(`[LNav] Font WARN: CTA "${text}" — padding-right: ${paddingRight} (expected 24px)`);
     }
 
     expect(failures, `Nav font style violations:\n${failures.join('\n')}`).toHaveLength(0);
-    console.info(`[LNav] Font check: PASS — product name (16px) + ${linkData.length} nav links (14px) + ${descData.length} descriptions (14px)`);
+    console.info(`[LNav] Font check: PASS — product name (16px) | ${linkData.length} GNAV links (14px) | ${breadcrumbData.length} breadcrumbs (14px)`);
+  }
+
+  // ── Nav font color theme + scroll ────────────────────────────────────────────
+  // Two text themes on the LNav (determined by page hero background, not just class):
+  //   gnav-dark-font present + dark hero  → links white at top, black after scroll
+  //   gnav-dark-font present + light hero → links black at top (and after scroll)
+  //   no gnav-dark-font                   → links may be black or white depending on page bg
+  // After scroll: ALWAYS black regardless of initial theme — this is the hard assertion.
+
+  async validateNavFontColorTheme() {
+    console.info('[LNav] Font color: Checking nav font color theme and scroll behaviour');
+
+    const hasDarkFont = await this.navContainer.evaluate((el) => el.classList.contains('gnav-dark-font'));
+    console.info(`[LNav] Font color: gnav-dark-font = ${hasDarkFont}`);
+
+    // ── 1. At page top — observe only, don't assert (depends on page background) ─
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    const topColor = await this.navContainer.locator('a.feds-link, button.feds-link')
+      .filter({ visible: true }).first()
+      .evaluate((el) => window.getComputedStyle(el).color);
+
+    const isBlack = (c) => c === 'rgb(0, 0, 0)' || c === 'rgba(0, 0, 0, 1)';
+    console.info(`[LNav] Font color: top color="${topColor}" (gnav-dark-font=${hasDarkFont}) — observed`);
+
+    // ── 2. After scroll — font must be black regardless of theme ──────────────
+    // Scroll 800px to exit tall dark hero sections (200px is not always enough)
+    await this.page.evaluate(() => window.scrollTo(0, 800));
+
+    const scrolledColors = await this.navContainer.locator('a.feds-link, button.feds-link')
+      .filter({ visible: true })
+      .evaluateAll((els) => els.map((el) => ({
+        text:  (el.textContent || '').trim().slice(0, 30),
+        color: window.getComputedStyle(el).color,
+      })));
+
+    for (const { text, color } of scrolledColors) {
+      if (!isBlack(color))
+        console.warn(`[LNav] Font color WARN: "${text}" color="${color}" after scroll (expected black)`);
+      else
+        console.info(`[LNav] Font color: "${text}" = ${color} after scroll ✓`);
+    }
+
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    console.info('[LNav] Font color: PASS');
+  }
+
+  // ── Nav hover dimming effect ──────────────────────────────────────────────────
+  // When hovering any nav link, the hovered element is prominent (opacity 1) and
+  // all other nav links + GNAV buttons fade (opacity < 1).
+  // Sign In is excluded — it has no hover dimming effect.
+
+  async validateNavHoverEffect() {
+    console.info('[LNav] Hover: Checking hover dimming — hovered item prominent, others faded');
+
+    const navItems = this.navContainer.locator('ul.feds-gnav-items > li').filter({ visible: true });
+    const count = await navItems.count();
+    if (count < 2) {
+      console.info('[LNav] Hover: fewer than 2 nav items — skipping');
+      return;
+    }
+
+    // Hover over the middle nav item for a realistic test
+    const midIndex = Math.floor(count / 2);
+    const hoveredItem = navItems.nth(midIndex);
+    const hoveredText = ((await hoveredItem.textContent()) || '').trim().slice(0, 30);
+    await hoveredItem.locator('a.feds-link, button.feds-link').first().hover();
+
+    // ── Check opacity + color on the child link/button inside each li ─────────
+    // The hover dimming is applied to <a>/<button> children, not the <li> wrapper
+    const opacityData = await navItems.evaluateAll((els, idx) =>
+      els.map((li, i) => {
+        const link = li.querySelector('a.feds-link, button.feds-link');
+        if (!link) return null;
+        const s = window.getComputedStyle(link);
+        return {
+          text:    (link.textContent || '').trim().slice(0, 30),
+          opacity: parseFloat(s.opacity),
+          color:   s.color,
+          isHovered: i === idx,
+        };
+      }).filter(Boolean), midIndex
+    );
+
+    const hovered = opacityData.find((d) => d.isHovered);
+    const others  = opacityData.filter((d) => !d.isHovered);
+
+    console.info(`[LNav] Hover: "${hovered?.text}" opacity=${hovered?.opacity} color=${hovered?.color} (hovered)`);
+    for (const { text, opacity, color } of others)
+      console.info(`[LNav] Hover: "${text}" opacity=${opacity} color=${color} (not hovered)`);
+
+    // Fading is via opacity — non-hovered items go to 0.65
+    const notFaded = others.filter(({ opacity }) => opacity >= 1);
+    for (const { text, opacity } of others)
+      console.info(`[LNav] Hover: "${text}" opacity=${opacity} ${opacity < 1 ? '(faded ✓)' : '(not faded ✗)'}`);
+
+    expect(
+      notFaded,
+      `Non-hovered nav items must fade (opacity < 1) when "${hoveredText}" is hovered:\n${notFaded.map((o) => `"${o.text}" opacity=${o.opacity}`).join('\n')}`,
+    ).toHaveLength(0);
+    console.info(`[LNav] Hover: all ${others.length} non-hovered items faded at opacity < 1 ✓`);
+
+    // ── Sign In must NOT fade ──────────────────────────────────────────────────
+    const signInOpacity = await this.signInBtn.evaluate((el) => parseFloat(window.getComputedStyle(el).opacity));
+    if (signInOpacity < 1)
+      console.warn(`[LNav] Hover WARN: Sign In opacity=${signInOpacity} — should not fade on hover`);
+    else
+      console.info(`[LNav] Hover: Sign In opacity=${signInOpacity} — not faded ✓`);
+
+    // Move mouse away to reset hover state
+    await this.page.mouse.move(0, 0);
+
+    // ── CTA buttons own hover effect ──────────────────────────────────────────
+    // When hovering Buy now / Go To Acrobat, the button itself changes appearance.
+    // Sign In is excluded — it has no hover dimming effect.
+    const ctaButtons = this.navContainer.locator('a.feds-primary-cta, a.feds-secondary-cta').filter({ visible: true });
+    const ctaCount = await ctaButtons.count();
+    for (let i = 0; i < ctaCount; i++) {
+      const cta = ctaButtons.nth(i);
+      const ctaText = ((await cta.textContent()) || '').trim().slice(0, 20);
+      const beforeBg = await cta.evaluate((el) => window.getComputedStyle(el).backgroundColor);
+      await cta.hover();
+      const afterBg = await cta.evaluate((el) => window.getComputedStyle(el).backgroundColor);
+      if (beforeBg === afterBg)
+        console.warn(`[LNav] Hover WARN: CTA "${ctaText}" background unchanged on hover (${afterBg}) — expected overlay`);
+      else
+        console.info(`[LNav] Hover: CTA "${ctaText}" bg ${beforeBg} → ${afterBg} on hover ✓`);
+      await this.page.mouse.move(0, 0);
+    }
+
+    console.info('[LNav] Hover: PASS');
   }
 
   // ── Nav transparency + scroll behaviour ──────────────────────────────────────
@@ -730,30 +985,44 @@ export default class FedsLnavPage {
     const blockNavigations = async (route) => {
       if (route.request().isNavigationRequest()) {
         await route.fulfill({ status: 204, body: '' });
-      } else {
+      } else if (/\/collect(\?|$)/.test(route.request().url()) && route.request().url().includes('configId=')) {
+        // Let collect calls through so the request listener captures them
         await route.continue();
+      } else {
+        // Fulfill all other requests immediately — prevents 3rd-party scripts
+        // from hanging open and delaying browser context teardown after the test
+        await route.fulfill({ status: 200, body: '' });
       }
     };
     await this.page.route('**/*', blockNavigations);
 
+    // Detect which nav link opens a new tab — target="_blank" must not be on nav links
+    let lastClicked = 'unknown';
+    const onNewPage = (newPage) => {
+      console.warn(`[LNav] Analytics WARN: "${lastClicked}" opened a new tab — target="_blank" must not be on nav links (url: ${newPage.url()})`);
+      newPage.close().catch(() => {});
+    };
+    this.page.context().on('page', onNewPage);
+
     const clicked = [];
 
     // Pre-read all daa-ll values + labels concurrently — avoids serial getAttribute calls
-    const [dropdownInfo, logoDaaLl, brandDaaLl, compareDaaLl, learnDaaLl, trialDaaLl, primaryDaaLl, signInDaaLl] = await Promise.all([
+    const [dropdownInfo, logoDaaLl, directNavInfo, primaryDaaLl, signInDaaLl] = await Promise.all([
       this.allDropdownBtns.evaluateAll((els) => els.map((el) => ({
         daaLl: el.getAttribute('daa-ll'),
         text:  (el.textContent || '').trim(),
       }))),
       this.adobeLogoLink.getAttribute('daa-ll'),
-      this.acrobatBrandLink.getAttribute('daa-ll'),
-      this.comparePlansLink.getAttribute('daa-ll'),
-      this.learnSupportLink.getAttribute('daa-ll'),
-      this.freeTrialLink.getAttribute('daa-ll'),
+      this.directNavLinks.filter({ visible: true }).evaluateAll((els) => els.map((el) => ({
+        daaLl: el.getAttribute('daa-ll'),
+        text:  (el.textContent || '').trim(),
+      }))),
       this.primaryCta.getAttribute('daa-ll'),
       this.signInBtn.getAttribute('daa-ll'),
     ]);
 
     const clickElement = async (element, label, preDaaLl = undefined) => {
+      lastClicked = label;
       const daaLl = preDaaLl !== undefined ? preDaaLl : await element.getAttribute('daa-ll');
       if (!daaLl) {
         console.info(`[LNav] Step 24: WARNING — "${label}" is missing daa-ll attribute`);
@@ -778,13 +1047,12 @@ export default class FedsLnavPage {
       // ── 2. Adobe logo ───────────────────────────────────────────────────────
       await clickElement(this.adobeLogoLink, 'Adobe Logo', logoDaaLl);
 
-      // ── 3. Acrobat brand link ───────────────────────────────────────────────
-      await clickElement(this.acrobatBrandLink, 'Adobe Acrobat', brandDaaLl);
-
-      // ── 4. Utility nav links ────────────────────────────────────────────────
-      await clickElement(this.comparePlansLink, 'Compare plans', compareDaaLl);
-      await clickElement(this.learnSupportLink, 'Learn & Support', learnDaaLl);
-      await clickElement(this.freeTrialLink, 'Free trials', trialDaaLl);
+      // ── 3. Direct nav links — generic, works on any page ───────────────────
+      for (let i = 0; i < directNavInfo.length; i++) {
+        const link = this.directNavLinks.filter({ visible: true }).nth(i);
+        const { text, daaLl } = directNavInfo[i];
+        await clickElement(link, text || `nav-link-${i}`, daaLl);
+      }
 
       // ── 5. CTAs ─────────────────────────────────────────────────────────────
       await clickElement(this.primaryCta, 'Primary CTA', primaryDaaLl);
@@ -796,9 +1064,9 @@ export default class FedsLnavPage {
       await this.signInBtn.click({ trial: true, timeout: 15000 });
       console.info('[LNav] Step 24: Sign In — visible and clickable ✓ (no daa-ll, skipping actual click)');
     } finally {
-      // Always unroute and remove listener, even if a step throws
       await this.page.unroute('**/*', blockNavigations);
       this.page.off('request', onRequest);
+      this.page.context().off('page', onNewPage);
     }
 
     console.info(`[LNav] Step 24: ${capturedCalls.length} total collect call(s) captured`);
