@@ -25,10 +25,10 @@ const EXPECTED_UNAV_VERSION = parseExpectedVersion();
 // Build full URL: domain + spec path + optional query params.
 // Uses URL object so hash fragments (#category=...) are preserved.
 // subdomain: swap 'www' for another subdomain (e.g. 'helpx') while preserving stage/prod env.
-function buildUrl(domain, specPath, subdomain = null, skipExtraParams = false) {
+function buildUrl(domain, specPath, subdomain = null) {
   const base = (subdomain ? domain.replace('//www.', `//${subdomain}.`) : domain).replace(/\/$/, '');
   const path = specPath.startsWith('/') ? specPath : `/${specPath}`;
-  if (!EXTRA_PARAMS || skipExtraParams) return `${base}${path}`;
+  if (!EXTRA_PARAMS) return `${base}${path}`;
   const url = new URL(`${base}${path}`);
   for (const param of EXTRA_PARAMS.split('&')) {
     const [key, value = ''] = param.split('=');
@@ -154,7 +154,7 @@ test.describe('Universal Nav — full validation', () => {
     // Run one page:   --grep "@unav.*photoshop"
     for (const f of features) {
       test(`${f.name} | ${f.localeName} | ${f.pageName}, ${f.tags}`, async ({ page, baseURL }) => {
-        const url = buildUrl(RAW_BASE || baseURL, f.path, f.subdomain, f.skipExtraParams);
+        const url = buildUrl(RAW_BASE || baseURL, f.path, f.subdomain);
         console.info(`[unav] ${f.localeName} — ${f.pageName} → ${url}`);
         await runChecks(page, url, f.clientId, f.lang, EXPECTED_UNAV_VERSION, f.noAppSwitcher, f.slimFooter, f.marketSelector);
       });

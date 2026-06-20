@@ -78,6 +78,5 @@ export const features = unavLocales.flatMap((locale) =>
     slimFooter:      !!page.slimFooter,
     marketSelector:  !!page.marketSelector,
     subdomain:       page.subdomain ?? null,
-    skipExtraParams: !!page.skipExtraParams,
   }))
 );
