@@ -441,56 +441,52 @@ export default class UnavPage {
     await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await this.footer.waitFor({ state: 'visible', timeout: 15000 });
 
-    if (this.slimFooter) {
-      await this.#ok(`[Footer] Slim footer page — skipping social links, featured products, change region checks`);
-    } else {
-      await this.page.locator('ul.feds-social').waitFor({ state: 'visible', timeout: 5000 }).catch(() => null);
+    await this.page.locator('ul.feds-social').waitFor({ state: 'visible', timeout: 5000 }).catch(() => null);
 
-      const hasFeaturedProducts = await this.footerFeaturedProducts.isVisible().catch(() => false);
-      if (hasFeaturedProducts) {
-        const productCount = await this.footerProductLinks.count();
-        expect(productCount, `[${pageUrl}] Footer featured products section is visible but contains 0 product links`).toBeGreaterThan(0);
-        for (let i = 0; i < productCount; i++) {
-          const link = this.footerProductLinks.nth(i);
-          const name = (await link.innerText().catch(() => '')).trim() || `product-${i}`;
-          const href = await link.getAttribute('href');
-          expect(href, `[${pageUrl}] Footer featured product "${name}" (index ${i}) has no href`).toBeTruthy();
-          if (href.startsWith('http')) {
-            const host = new URL(href).hostname;
-            expect(
-              host.endsWith('adobe.com'),
-              `[${pageUrl}] Footer product "${name}" href="${href}" points to "${host}" — expected an adobe.com domain`
-            ).toBe(true);
-          }
+    const hasFeaturedProducts = await this.footerFeaturedProducts.isVisible().catch(() => false);
+    if (hasFeaturedProducts) {
+      const productCount = await this.footerProductLinks.count();
+      expect(productCount, `[${pageUrl}] Footer featured products section is visible but contains 0 product links`).toBeGreaterThan(0);
+      for (let i = 0; i < productCount; i++) {
+        const link = this.footerProductLinks.nth(i);
+        const name = (await link.innerText().catch(() => '')).trim() || `product-${i}`;
+        const href = await link.getAttribute('href');
+        expect(href, `[${pageUrl}] Footer featured product "${name}" (index ${i}) has no href`).toBeTruthy();
+        if (href.startsWith('http')) {
+          const host = new URL(href).hostname;
+          expect(
+            host.endsWith('adobe.com'),
+            `[${pageUrl}] Footer product "${name}" href="${href}" points to "${host}" — expected an adobe.com domain`
+          ).toBe(true);
         }
-        await this.#ok(`[Footer] featured products: ${productCount} links ✓`);
-      } else {
-        await this.#ok(`[Footer] featured products: not present on this page — skipping`);
       }
+      await this.#ok(`[Footer] featured products: ${productCount} links ✓`);
+    } else {
+      await this.#ok(`[Footer] featured products: not present on this page — skipping`);
+    }
 
-      const socialCount = await this.footerSocialLinks.count();
-      expect(socialCount, `[${pageUrl}] Footer social links (ul.feds-social a) — 0 found, expected at least 1`).toBeGreaterThan(0);
-      for (let i = 0; i < socialCount; i++) {
-        const link     = this.footerSocialLinks.nth(i);
-        const platform = (await link.getAttribute('aria-label').catch(() => null)) || `social-${i}`;
-        const href     = await link.getAttribute('href');
-        expect(href, `[${pageUrl}] Footer social link "${platform}" (index ${i}) has no href`).toBeTruthy();
-      }
-      await this.#ok(`[Footer] social links: ${socialCount} ✓`);
+    const socialCount = await this.footerSocialLinks.count();
+    expect(socialCount, `[${pageUrl}] Footer social links (ul.feds-social a) — 0 found, expected at least 1`).toBeGreaterThan(0);
+    for (let i = 0; i < socialCount; i++) {
+      const link     = this.footerSocialLinks.nth(i);
+      const platform = (await link.getAttribute('aria-label').catch(() => null)) || `social-${i}`;
+      const href     = await link.getAttribute('href');
+      expect(href, `[${pageUrl}] Footer social link "${platform}" (index ${i}) has no href`).toBeTruthy();
+    }
+    await this.#ok(`[Footer] social links: ${socialCount} ✓`);
 
-      const isExpress       = new URL(pageUrl).pathname.includes('/express');
-      const isHelpx         = new URL(pageUrl).hostname.startsWith('helpx.');
-      const regionPicker    = isHelpx
-        ? this.page.locator('a.feds-regionPicker').nth(1)
-        : this.footerChangeRegion;
-      const hasRegionPicker = await regionPicker.isVisible().catch(() => false);
-      if (hasRegionPicker) {
-        await this.#ok(`[Footer] change region ✓`);
-      } else if (isExpress) {
-        await this.#warn(`[Footer] Footer "Change region" not present on Express — expected`);
-      } else {
-        expect(false, `[${pageUrl}] Footer "Change region" link (a.feds-regionPicker) must exist`).toBe(true);
-      }
+    const isExpress       = new URL(pageUrl).pathname.includes('/express');
+    const isHelpx         = new URL(pageUrl).hostname.startsWith('helpx.');
+    const regionPicker    = isHelpx
+      ? this.page.locator('a.feds-regionPicker').nth(1)
+      : this.footerChangeRegion;
+    const hasRegionPicker = await regionPicker.isVisible().catch(() => false);
+    if (hasRegionPicker) {
+      await this.#ok(`[Footer] change region ✓`);
+    } else if (isExpress) {
+      await this.#warn(`[Footer] Footer "Change region" not present on Express — expected`);
+    } else {
+      expect(false, `[${pageUrl}] Footer "Change region" link (a.feds-regionPicker) must exist`).toBe(true);
     }
 
     // Auto-detect footer type — C2 pages use feds-footer-miscLinks-legal, standard use feds-footer-legalWrapper.
